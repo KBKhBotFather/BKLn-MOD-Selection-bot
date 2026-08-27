@@ -1,5 +1,7 @@
 import asyncio
 import re
+import os
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -130,7 +132,6 @@ async def receive_meme(message: types.Message, state: FSMContext):
         await message.answer("You have successfully submitted a total of 5 memes✅\n\nYour limit is over. Wait for the result. Thank you!♥️")
         return
 
-    # To prevent multiple fast uploads
     await state.set_state(MemeSubmit.confirming_meme)
     await state.update_data(temp_file_id=message.photo[-1].file_id)
     
@@ -387,7 +388,6 @@ async def toggle_result(cq: types.CallbackQuery):
     unique_id = cq.data.split("_")[2]
     await database.toggle_admin_selection(db_pool, unique_id)
     
-    # Update keyboard
     results = await database.get_final_results(db_pool)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
@@ -444,10 +444,27 @@ async def execute_publish(cq: types.CallbackQuery):
     else:
         await cq.message.delete()
 
+# ================= RENDER DUMMY WEB SERVER =================
+async def handle_ping(request):
+    return web.Response(text="Bot is running smoothly on Render!")
+
+async def web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000)) # Render by default uses port 10000
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
 # ================= MAIN =================
 async def main():
     global db_pool
     db_pool = await database.get_pool()
+    
+    # Render-এর জন্য ডামি সার্ভার চালু করা
+    asyncio.create_task(web_server())
+    
     print("Bot Started Successfully!")
     await dp.start_polling(bot)
 
