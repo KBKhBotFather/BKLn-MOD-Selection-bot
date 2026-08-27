@@ -448,38 +448,44 @@ async def execute_publish(cq: types.CallbackQuery):
     else:
         await cq.message.delete()
 
-# ================= RENDER DUMMY WEB SERVER =================
+# ================= RENDER WEB SERVER (PORT BINDING FIXED) =================
 async def handle_ping(request):
     return web.Response(text="Bot is running smoothly on Render!", status=200)
 
 async def web_server():
     app = web.Application()
     app.router.add_get('/', handle_ping)
-    app.router.add_head('/', handle_ping) # UptimeRobot এর HEAD রিকোয়েস্ট সামলানোর জন্য
+    app.router.add_head('/', handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
+    
+    # Render থেকে দেওয়া পোর্ট সঠিকভাবে ধরা
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
+    print(f"Web server started on port {port}")
 
 # ================= MAIN =================
 async def main():
     global db_pool
     db_pool = await database.get_pool()
     
-    asyncio.create_task(web_server())
+    # প্রথমে Render এর পোর্ট সার্ভার চালু করা যাতে Port scan timeout না আসে
+    await web_server()
     
-    # আগের কোনো Webhook আটকে থাকলে তা রিমুভ করা
-    await bot.delete_webhook(drop_pending_updates=True)
+    # আগের সব গেটআপডেট বা ওয়েবহুক ক্লিয়ার করে কনফ্লিক্ট দূর করা
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        print(f"Webhook clear warning: {e}")
     
     print("Bot Started Successfully!")
     
-    # বট ক্র্যাশ করলেও যেন অটোমেটিক আবার চালু হয়, তার জন্য লুপ
     while True:
         try:
-            await dp.start_polling(bot)
+            await dp.start_polling(bot, direct_updates=True)
         except Exception as e:
-            print(f"Bot crashed or connection lost: {e}. Restarting in 5 seconds...")
+            print(f"Polling error: {e}. Restarting in 5 seconds...")
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
