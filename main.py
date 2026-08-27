@@ -146,7 +146,7 @@ async def receive_meme(message: types.Message, state: FSMContext):
 
 @dp.message(F.photo, MemeSubmit.confirming_meme)
 async def block_multiple_memes(message: types.Message):
-    await message.answer("একসাথে একাধিক মিম সাবমিট করা যাবেবিধা যাবে না। একটি করে মিম সাবমিট করুন। তাড়াহুড়ো করা যাবে না!")
+    await message.answer("একসাথে একাধিক মিম সাবমিট করা যাবে না। একটি করে মিম সাবমিট করুন। তাড়াহুড়ো করা যাবে না!")
 
 @dp.callback_query(F.data.startswith("meme_"))
 async def confirm_meme(cq: types.CallbackQuery, state: FSMContext):
@@ -450,11 +450,12 @@ async def execute_publish(cq: types.CallbackQuery):
 
 # ================= RENDER DUMMY WEB SERVER =================
 async def handle_ping(request):
-    return web.Response(text="Bot is running smoothly on Render!")
+    return web.Response(text="Bot is running smoothly on Render!", status=200)
 
 async def web_server():
     app = web.Application()
     app.router.add_get('/', handle_ping)
+    app.router.add_head('/', handle_ping) # UptimeRobot এর HEAD রিকোয়েস্ট সামলানোর জন্য
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
@@ -472,7 +473,14 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     
     print("Bot Started Successfully!")
-    await dp.start_polling(bot)
+    
+    # বট ক্র্যাশ করলেও যেন অটোমেটিক আবার চালু হয়, তার জন্য লুপ
+    while True:
+        try:
+            await dp.start_polling(bot)
+        except Exception as e:
+            print(f"Bot crashed or connection lost: {e}. Restarting in 5 seconds...")
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(main())
