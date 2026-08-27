@@ -2,11 +2,12 @@ import asyncio
 import re
 import os
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart, Command
+from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
+from typing import Callable, Dict, Any, Awaitable
 import database
 
 # টোকেন ও অ্যাডমিন আইডি
@@ -31,23 +32,26 @@ class AdminSettings(StatesGroup):
     waiting_for_ids = State()
 
 # ================= MIDDLEWARE (On/Off Check) =================
-@dp.message()
-async def global_check(message: types.Message, state: FSMContext, handler):
-    if message.from_user.id != ADMIN_ID:
-        is_on = await database.get_event_status(db_pool)
-        if not is_on:
-            await message.answer("Event End!")
-            return
-    return await handler(message, state)
+class GlobalCheckMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[types.TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: types.TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        user = data.get("event_from_user")
+        if user and user.id != ADMIN_ID:
+            is_on = await database.get_event_status(db_pool)
+            if not is_on:
+                if isinstance(event, types.Message):
+                    await event.answer("Event End!")
+                elif isinstance(event, types.CallbackQuery):
+                    await event.answer("Event End!", show_alert=True)
+                return
+        return await handler(event, data)
 
-@dp.callback_query()
-async def global_check_cq(cq: types.CallbackQuery, state: FSMContext, handler):
-    if cq.from_user.id != ADMIN_ID:
-        is_on = await database.get_event_status(db_pool)
-        if not is_on:
-            await cq.answer("Event End!", show_alert=True)
-            return
-    return await handler(cq, state)
+dp.message.middleware(GlobalCheckMiddleware())
+dp.callback_query.middleware(GlobalCheckMiddleware())
 
 # ================= 1. MEMBER VIEW =================
 @dp.message(CommandStart())
@@ -142,7 +146,7 @@ async def receive_meme(message: types.Message, state: FSMContext):
 
 @dp.message(F.photo, MemeSubmit.confirming_meme)
 async def block_multiple_memes(message: types.Message):
-    await message.answer("একসাথে একাধিক মিম সাবমিট করা যাবে না। একটি করে মিম সাবমিট করুন। তাড়াহুড়ো করা যাবে না!")
+    await message.answer("একসাথে একাধিক মিম সাবমিট করা যাবেবিধা যাবে না। একটি করে মিম সাবমিট করুন। তাড়াহুড়ো করা যাবে না!")
 
 @dp.callback_query(F.data.startswith("meme_"))
 async def confirm_meme(cq: types.CallbackQuery, state: FSMContext):
@@ -453,7 +457,7 @@ async def web_server():
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 10000)) # Render by default uses port 10000
+    port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
@@ -462,8 +466,10 @@ async def main():
     global db_pool
     db_pool = await database.get_pool()
     
-    # Render-এর জন্য ডামি সার্ভার চালু করা
     asyncio.create_task(web_server())
+    
+    # আগের কোনো Webhook আটকে থাকলে তা রিমুভ করা
+    await bot.delete_webhook(drop_pending_updates=True)
     
     print("Bot Started Successfully!")
     await dp.start_polling(bot)
