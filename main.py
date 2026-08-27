@@ -454,12 +454,14 @@ async def handle_ping(request):
 
 async def web_server():
     app = web.Application()
+    
+    # এখানে শুধুমাত্র add_get রাখা হয়েছে, এরর দেওয়া লাইনটি রিমুভ করা হয়েছে
     app.router.add_get('/', handle_ping)
-    app.router.add_head('/', handle_ping)
+    
     runner = web.AppRunner(app)
     await runner.setup()
     
-    # Render থেকে দেওয়া পোর্ট সঠিকভাবে ধরা
+    # Render থেকে দেওয়া পোর্ট সঠিকভাবে ধরা
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
@@ -473,7 +475,7 @@ async def main():
     # প্রথমে Render এর পোর্ট সার্ভার চালু করা যাতে Port scan timeout না আসে
     await web_server()
     
-    # আগের সব গেটআপডেট বা ওয়েবহুক ক্লিয়ার করে কনফ্লিক্ট দূর করা
+    # আগের সব গেটআপডেট বা ওয়েবহুক ক্লিয়ার করে কনফ্লিক্ট দূর করা
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
