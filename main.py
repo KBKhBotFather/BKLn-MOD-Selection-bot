@@ -211,7 +211,7 @@ async def receive_meme(message: types.Message, state: FSMContext):
 
 @dp.message(F.photo, MemeSubmit.confirming_meme)
 async def block_multiple_memes(message: types.Message):
-    await message.answer("একসাথে একাধিক মিম সাবমিট করা যাবেবিধা নেই। একটি করে মিম সাবমিট করুন। তাড়াহুড়ো করা যাবে না!")
+    await message.answer("একসাথে একাধিক মিম সাবমিট করা যাবে না। একটি করে মিম সাবমিট করুন। তাড়াহুড়ো করা যাবে না!")
 
 @dp.callback_query(F.data.startswith("meme_"))
 async def confirm_meme(cq: types.CallbackQuery, state: FSMContext):
@@ -524,92 +524,14 @@ async def registered_members_menu(message: types.Message):
     await message.answer("Select category to manage:", reply_markup=kb)
 
 @dp.callback_query(F.data == "reg_cancel")
-async def cancel_reg_menu(cq: types.CallbackQuery):
+async def cancel_reg_menu(cq: types.CallbackQuery, state: FSMContext):
+    await state.update_data(pending_actions={})
     await cq.message.delete()
     await cq.message.answer("Process Cancelled✅")
 
-@dp.callback_query(F.data == "reg_mod_list")
-async def show_moderators_list(cq: types.CallbackQuery):
-    mods = await database.get_all_moderators(db_pool)
-    if not mods:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Submit Change Pass", callback_data="reg_sub_pass")],
-            [InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
-        ])
-        return await cq.message.edit_text("Moderators:\nNo moderators registered yet.", reply_markup=kb)
-
-    inline_kb = []
-    for m in mods:
-        name = m['name'] or m['unique_id']
-        b_icon = "🟢" if m['is_blocked'] else "⛔"
-        inline_kb.append([
-            InlineKeyboardButton(text=name, callback_data="noop"),
-            InlineKeyboardButton(text=b_icon, callback_data=f"toggle_block_{m['telegram_id']}"),
-            InlineKeyboardButton(text="❌", callback_data=f"remove_user_{m['telegram_id']}")
-        ])
-    
-    inline_kb.append([InlineKeyboardButton(text="Submit Change Pass", callback_data="reg_sub_pass")])
-    inline_kb.append([InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")])
-    
-    await cq.message.edit_text("Moderatos:", reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_kb))
-
-@dp.callback_query(F.data == "reg_mem_list")
-async def show_members_list(cq: types.CallbackQuery):
-    mems = await database.get_all_members(db_pool)
-    if not mems:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Submit", callback_data="reg_sub_mem")],
-            [InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
-        ])
-        return await cq.message.edit_text("Members:\nNo members registered yet.", reply_markup=kb)
-
-    inline_kb = []
-    for mem in mems:
-        uid = mem['unique_id']
-        b_icon = "🟢" if mem['is_blocked'] else "⛔"
-        inline_kb.append([
-            InlineKeyboardButton(text=uid, callback_data="noop"),
-            InlineKeyboardButton(text=b_icon, callback_data=f"toggle_block_{mem['telegram_id']}"),
-            InlineKeyboardButton(text="❌", callback_data=f"remove_user_{mem['telegram_id']}")
-        ])
-    
-    inline_kb.append([InlineKeyboardButton(text="Submit", callback_data="reg_sub_mem")])
-    inline_kb.append([InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")])
-    
-    await cq.message.edit_text("Members:", reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_kb))
-
-@dp.callback_query(F.data == "noop")
-async def noop_cb(cq: types.CallbackQuery):
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("toggle_block_"))
-async def toggle_block_user(cq: types.CallbackQuery):
-    tg_id = int(cq.data.split("_")[2])
-    user = await database.get_user(db_pool, tg_id)
-    if user:
-        new_status = not user['is_blocked']
-        await database.update_user_status(db_pool, tg_id, new_status)
-        
-        # লিস্ট রিফ্রেশ করা
-        if user['role'] == 'MODERATOR':
-            await show_moderators_list(cq)
-        else:
-            await show_members_list(cq)
-
-@dp.callback_query(F.data.startswith("remove_user_"))
-async def remove_user(cq: types.CallbackQuery):
-    tg_id = int(cq.data.split("_")[2])
-    user = await database.get_user(db_pool, tg_id)
-    if user:
-        role = user['role']
-        await database.delete_user_data(db_pool, tg_id)
-        if role == 'MODERATOR':
-            await show_moderators_list(cq)
-        else:
-            await show_members_list(cq)
-
 @dp.callback_query(F.data == "reg_back")
-async def reg_back_handler(cq: types.CallbackQuery):
+async def reg_back_handler(cq: types.CallbackQuery, state: FSMContext):
+    await state.update_data(pending_actions={})
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Moderators", callback_data="reg_mod_list"),
          InlineKeyboardButton(text="Members", callback_data="reg_mem_list")],
@@ -617,17 +539,128 @@ async def reg_back_handler(cq: types.CallbackQuery):
     ])
     await cq.message.edit_text("Select category to manage:", reply_markup=kb)
 
-@dp.callback_query(F.data.in_({"reg_sub_pass", "reg_sub_mem"}))
-async def reg_submit_handler(cq: types.CallbackQuery, state: FSMContext):
-    if cq.data == "reg_sub_pass":
+@dp.callback_query(F.data == "reg_mod_list")
+async def show_moderators_list(cq: types.CallbackQuery, state: FSMContext):
+    mods = await database.get_all_moderators(db_pool)
+    if not mods:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Back", callback_data="reg_mod_list"),
-             InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
+            [InlineKeyboardButton(text="Change Pass", callback_data="reg_change_pass")],
+            [InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
         ])
-        await cq.message.edit_text("Old Password: #KBKh2022#\n\nEnter New Password:", reply_markup=kb)
-        await state.set_state(AdminSettings.waiting_for_new_pass)
+        return await cq.message.edit_text("Moderators:\nNo moderators registered yet.", reply_markup=kb)
+
+    data = await state.get_data()
+    pending = data.get('pending_actions', {})
+
+    inline_kb = []
+    for m in mods:
+        tg_id_str = str(m['telegram_id'])
+        name = m['name'] or m['unique_id']
+        pend_act = pending.get(tg_id_str)
+        
+        b_icon = "🟢" if m['is_blocked'] else "⛔"
+        if pend_act == 'block': b_icon += "(selected)"
+        r_icon = "❌(selected)" if pend_act == 'remove' else "❌"
+        
+        inline_kb.append([
+            InlineKeyboardButton(text=name, callback_data="noop"),
+            InlineKeyboardButton(text=b_icon, callback_data=f"act_b_{m['telegram_id']}_mod"),
+            InlineKeyboardButton(text=r_icon, callback_data=f"act_r_{m['telegram_id']}_mod")
+        ])
+    
+    inline_kb.append([InlineKeyboardButton(text="Submit", callback_data="reg_exec_mod")])
+    inline_kb.append([InlineKeyboardButton(text="Change Pass", callback_data="reg_change_pass")])
+    inline_kb.append([InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")])
+    
+    await cq.message.edit_text("Moderators:\n", reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_kb))
+
+@dp.callback_query(F.data == "reg_mem_list")
+async def show_members_list(cq: types.CallbackQuery, state: FSMContext):
+    mems = await database.get_all_members(db_pool)
+    if not mems:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
+        ])
+        return await cq.message.edit_text("Members:\nNo members registered yet.", reply_markup=kb)
+
+    data = await state.get_data()
+    pending = data.get('pending_actions', {})
+
+    inline_kb = []
+    for mem in mems:
+        tg_id_str = str(mem['telegram_id'])
+        uid = mem['unique_id']
+        pend_act = pending.get(tg_id_str)
+        
+        b_icon = "🟢" if mem['is_blocked'] else "⛔"
+        if pend_act == 'block': b_icon += "(selected)"
+        r_icon = "❌(selected)" if pend_act == 'remove' else "❌"
+        
+        inline_kb.append([
+            InlineKeyboardButton(text=uid, callback_data="noop"),
+            InlineKeyboardButton(text=b_icon, callback_data=f"act_b_{mem['telegram_id']}_mem"),
+            InlineKeyboardButton(text=r_icon, callback_data=f"act_r_{mem['telegram_id']}_mem")
+        ])
+    
+    inline_kb.append([InlineKeyboardButton(text="Submit", callback_data="reg_exec_mem")])
+    inline_kb.append([InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")])
+    
+    await cq.message.edit_text("Members:\n", reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_kb))
+
+@dp.callback_query(F.data == "noop")
+async def noop_cb(cq: types.CallbackQuery):
+    await cq.answer()
+
+@dp.callback_query(F.data.startswith("act_"))
+async def select_action(cq: types.CallbackQuery, state: FSMContext):
+    parts = cq.data.split("_")
+    act_type = 'block' if parts[1] == 'b' else 'remove'
+    tg_id_str = parts[2]
+    list_type = parts[3]
+    
+    data = await state.get_data()
+    pending = data.get('pending_actions', {})
+    
+    # Toggle logic: if already selected, remove selection. Otherwise set/overwrite selection.
+    if pending.get(tg_id_str) == act_type:
+        del pending[tg_id_str]
     else:
-        await cq.message.edit_text("Submitted✅")
+        pending[tg_id_str] = act_type
+        
+    await state.update_data(pending_actions=pending)
+    
+    if list_type == 'mod':
+        await show_moderators_list(cq, state)
+    else:
+        await show_members_list(cq, state)
+
+@dp.callback_query(F.data.startswith("reg_exec_"))
+async def execute_pending_actions(cq: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    pending = data.get('pending_actions', {})
+    
+    for tg_id_str, action in pending.items():
+        tg_id = int(tg_id_str)
+        if action == 'remove':
+            await database.delete_user_data(db_pool, tg_id)
+        elif action == 'block':
+            user = await database.get_user(db_pool, tg_id)
+            if user:
+                new_status = not user['is_blocked']
+                await database.update_user_status(db_pool, tg_id, new_status)
+                
+    await state.update_data(pending_actions={})
+    await cq.message.edit_text("Submitted✅")
+
+@dp.callback_query(F.data == "reg_change_pass")
+async def change_pass_prompt(cq: types.CallbackQuery, state: FSMContext):
+    current_pass = await database.get_mod_password(db_pool)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Back", callback_data="reg_back"),
+         InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
+    ])
+    await cq.message.edit_text(f"Old Password: {current_pass}\nPlease Enter New Password:", reply_markup=kb)
+    await state.set_state(AdminSettings.waiting_for_new_pass)
 
 @dp.message(AdminSettings.waiting_for_new_pass)
 async def save_new_password(message: types.Message, state: FSMContext):
@@ -639,7 +672,7 @@ async def save_new_password(message: types.Message, state: FSMContext):
     new_pass = message.text.strip()
     await database.update_mod_password(db_pool, new_pass)
     await state.clear()
-    await message.answer("Password updated successfully & Submitted✅")
+    await message.answer(f"Password Changed✅\nYour New Password Is: {new_pass}")
 
 # ---- ADMIN RESULTS & PUBLISH ----
 @dp.message(F.text == "Result")
