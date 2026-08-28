@@ -22,6 +22,7 @@ db_pool = None
 class MemberReg(StatesGroup):
     waiting_for_id = State()
     waiting_for_phone = State()
+    confirming_profile = State()
     waiting_for_meme = State()
 
 class MemeSubmit(StatesGroup):
@@ -31,7 +32,7 @@ class AdminSettings(StatesGroup):
     waiting_for_numbers = State()
     waiting_for_ids = State()
 
-# ================= MIDDLEWARE (On/Off Check) =================
+# ================= MIDDLEWARE =================
 class GlobalCheckMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -73,7 +74,7 @@ async def start_cmd(message: types.Message):
 @dp.message(F.text == "Registration")
 async def start_registration(message: types.Message, state: FSMContext):
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Cancel")]], resize_keyboard=True)
-    await message.answer("Enter your Unique ID\n(Example: MOD001)", reply_markup=kb)
+    await message.answer("Please enter your unique ID:", reply_markup=kb)
     await state.set_state(MemberReg.waiting_for_id)
 
 @dp.message(F.text == "Cancel")
@@ -88,52 +89,80 @@ async def process_id(message: types.Message, state: FSMContext):
         return await process_cancel(message, state)
         
     unique_id = message.text.replace(" ", "").upper()
-    is_valid = await database.check_valid_credential(db_pool, unique_id, 'UNIQUE_ID')
+    is_valid = await database.check_valid_unique_id(db_pool, unique_id)
     
     if is_valid:
         await state.update_data(unique_id=unique_id)
-        kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Cancel"), KeyboardButton(text="Back")]], resize_keyboard=True)
-        await message.answer("Valid Unique ID✅\n\nEnter your valid WhatsApp Number:", reply_markup=kb)
+        kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Cancel")]], resize_keyboard=True)
+        await message.answer("Valid Unique ID✅\n\nPlease enter Mobile Number:", reply_markup=kb)
         await state.set_state(MemberReg.waiting_for_phone)
     else:
-        await message.answer("Invalid Unique ID✅\n\nEnter your Unique ID\n(Example: MOD001)")
+        kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Cancel")]], resize_keyboard=True)
+        await message.answer("Invalid Unique ID❌\nPlease enter the correct unique ID:", reply_markup=kb)
+
+def format_phone(p):
+    raw = p.replace("-", "").replace(" ", "").replace("+", "")
+    if raw.startswith("88"): raw = raw[2:]
+    if len(raw) == 10 and not raw.startswith("0"):
+        raw = "0" + raw
+    return raw
 
 @dp.message(MemberReg.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
     if message.text == "Cancel":
         return await process_cancel(message, state)
-    if message.text == "Back":
-        return await start_registration(message, state)
 
-    raw_phone = message.text.replace("-", "").replace(" ", "").replace("+88", "")
-    phone_match = re.search(r'\d{11}$', raw_phone)
+    raw_phone = format_phone(message.text)
     
-    if phone_match:
-        phone = phone_match.group()
-        is_valid = await database.check_valid_credential(db_pool, phone, 'PHONE_NUMBER')
-        if is_valid:
-            data = await state.get_data()
-            await database.register_user(db_pool, message.from_user.id, data['unique_id'], phone, 'MEMBER')
-            await message.answer("Registration Complete✅\n\nআপনি এবার প্রতিযোগিতার জন্য প্রয়োজনীয় Meme এখানে সাবমিট করতে পারেন!", reply_markup=ReplyKeyboardRemove())
-            await state.set_state(MemberReg.waiting_for_meme)
+    if len(raw_phone) == 11 and raw_phone.isdigit():
+        data = await state.get_data()
+        is_matched = await database.check_phone_for_id(db_pool, data['unique_id'], raw_phone)
+        
+        if is_matched:
+            await state.update_data(phone=raw_phone)
+            kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Submit"), KeyboardButton(text="Cancel")]], resize_keyboard=True)
+            text = f"🎫Final Registration\n\nUnique ID: {data['unique_id']}\nMobile Number: {raw_phone}\n\nPlease confirm your information and then press submit!"
+            await message.answer(text, reply_markup=kb)
+            await state.set_state(MemberReg.confirming_profile)
             return
             
-    await message.answer("Invalid Number✅\n\nEnter your valid WhatsApp Number:")
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Cancel")]], resize_keyboard=True)
+    await message.answer("Invalid Number❌\nPlease enter the correct Number:", reply_markup=kb)
+
+@dp.message(MemberReg.confirming_profile)
+async def submit_profile(message: types.Message, state: FSMContext):
+    if message.text == "Cancel":
+        return await process_cancel(message, state)
+    if message.text == "Submit":
+        data = await state.get_data()
+        await database.register_user(db_pool, message.from_user.id, data['unique_id'], data['phone'], 'MEMBER')
+        await message.answer("Registration Complete✅\nএখন আপনি প্রতিযোগিতার জন্য প্রয়োজনীয় মিমস এখানে সরাসরি সাবমিট করতে পারেন।", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(MemberReg.waiting_for_meme)
 
 @dp.message(F.text == "Already Registered")
 async def already_registered(message: types.Message, state: FSMContext):
     user = await database.get_user(db_pool, message.from_user.id)
     if user:
-        await message.answer("আপনি ইতিমধ্যে নিবন্ধিত! Meme সাবমিট করতে পারেন।", reply_markup=ReplyKeyboardRemove())
-        await state.set_state(MemberReg.waiting_for_meme)
+        count = await database.get_meme_count(db_pool, message.from_user.id)
+        if count >= 5:
+            kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Refresh Status🔃")]], resize_keyboard=True)
+            await message.answer("Your limit is over. You have successfully submitted 5 Memes. Please wait for the results♥️", reply_markup=kb)
+        else:
+            await message.answer("আপনি ইতিমধ্যে নিবন্ধিত! Meme সাবমিট করতে পারেন।", reply_markup=ReplyKeyboardRemove())
+            await state.set_state(MemberReg.waiting_for_meme)
     else:
         await message.answer("আপনি এখনও রেজিস্ট্রেশন করেননি। Registration বাটনে চাপ দিন।")
+
+@dp.message(F.text == "Refresh Status🔃")
+async def handle_refresh_status(message: types.Message):
+    await message.answer("Your limit is over. You have successfully submitted 5 Memes. Please wait for the results♥️")
 
 @dp.message(F.photo, MemberReg.waiting_for_meme)
 async def receive_meme(message: types.Message, state: FSMContext):
     count = await database.get_meme_count(db_pool, message.from_user.id)
     if count >= 5:
-        await message.answer("You have successfully submitted a total of 5 memes✅\n\nYour limit is over. Wait for the result. Thank you!♥️")
+        kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Refresh Status🔃")]], resize_keyboard=True)
+        await message.answer("Your limit is over. You have successfully submitted 5 Memes. Please wait for the results♥️", reply_markup=kb)
         return
 
     await state.set_state(MemeSubmit.confirming_meme)
@@ -166,7 +195,9 @@ async def confirm_meme(cq: types.CallbackQuery, state: FSMContext):
         await cq.message.edit_text(f"Submitted successfully✅\n\nYou can submit up to {left} more memes!")
         await state.set_state(MemberReg.waiting_for_meme)
     else:
-        await cq.message.edit_text("You have successfully submitted a total of 5 memes✅\n\nYour limit is over. Wait for the result. Thank you!♥️")
+        await cq.message.edit_text("You have successfully submitted a total of 5 memes✅")
+        kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Refresh Status🔃")]], resize_keyboard=True)
+        await bot.send_message(cq.from_user.id, "Your limit is over. Wait for the result. Thank you!♥️", reply_markup=kb)
         await state.clear()
 
 # ================= 2. MODERATOR VIEW =================
@@ -331,8 +362,8 @@ async def save_numbers(message: types.Message, state: FSMContext):
         await message.answer("Process Cancelled✅")
         return await send_admin_panel(message.chat.id)
         
-    nums = [n.strip() for n in message.text.split("\n") if n.strip()]
-    await database.insert_credentials(db_pool, nums, "PHONE_NUMBER")
+    nums = [format_phone(n.strip()) for n in message.text.split("\n") if n.strip()]
+    await database.insert_paired_numbers(db_pool, nums)
     await state.clear()
     await message.answer("Number successfully added to Database✅")
     await send_admin_panel(message.chat.id)
@@ -345,7 +376,7 @@ async def save_ids(message: types.Message, state: FSMContext):
         return await send_admin_panel(message.chat.id)
         
     ids = [i.strip().upper() for i in message.text.split("\n") if i.strip()]
-    await database.insert_credentials(db_pool, ids, "UNIQUE_ID")
+    await database.insert_paired_ids(db_pool, ids)
     await state.clear()
     await message.answer("Unique ID successfully added to Database✅")
     await send_admin_panel(message.chat.id)
@@ -448,20 +479,16 @@ async def execute_publish(cq: types.CallbackQuery):
     else:
         await cq.message.delete()
 
-# ================= RENDER WEB SERVER (PORT BINDING FIXED) =================
+# ================= RENDER WEB SERVER =================
 async def handle_ping(request):
     return web.Response(text="Bot is running smoothly on Render!", status=200)
 
 async def web_server():
     app = web.Application()
-    
-    # এখানে শুধুমাত্র add_get রাখা হয়েছে, এরর দেওয়া লাইনটি রিমুভ করা হয়েছে
     app.router.add_get('/', handle_ping)
-    
+    app.router.add_head('/', handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    
-    # Render থেকে দেওয়া পোর্ট সঠিকভাবে ধরা
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
@@ -472,10 +499,8 @@ async def main():
     global db_pool
     db_pool = await database.get_pool()
     
-    # প্রথমে Render এর পোর্ট সার্ভার চালু করা যাতে Port scan timeout না আসে
     await web_server()
     
-    # আগের সব গেটআপডেট বা ওয়েবহুক ক্লিয়ার করে কনফ্লিক্ট দূর করা
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
