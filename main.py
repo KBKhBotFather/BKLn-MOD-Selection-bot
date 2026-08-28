@@ -56,16 +56,28 @@ dp.callback_query.middleware(GlobalCheckMiddleware())
 
 # ================= 1. MEMBER VIEW =================
 @dp.message(CommandStart())
-async def start_cmd(message: types.Message):
+async def start_cmd(message: types.Message, state: FSMContext):
     if message.from_user.id == ADMIN_ID:
         await send_admin_panel(message.chat.id)
         return
         
     user = await database.get_user(db_pool, message.from_user.id)
-    if user and user['role'] == 'MODERATOR':
-        await send_mod_panel(message.chat.id)
-        return
+    if user:
+        if user['role'] == 'MODERATOR':
+            await send_mod_panel(message.chat.id)
+            return
+        elif user['role'] == 'MEMBER':
+            count = await database.get_meme_count(db_pool, message.from_user.id)
+            if count >= 5:
+                kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Refresh Status🔃")]], resize_keyboard=True)
+                await message.answer("Your limit is over. You have successfully submitted 5 Memes. Please wait for the results♥️", reply_markup=kb)
+            else:
+                await message.answer("আপনি ইতিমধ্যে নিবন্ধিত! Meme সাবমিট করতে পারেন।", reply_markup=ReplyKeyboardRemove())
+                await state.set_state(MemberReg.waiting_for_meme)
+            return
 
+    # User ডেটাবেসে না থাকলে (নতুন অথবা Reset হওয়ার পর)
+    await state.clear()
     kb = ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="Registration"), KeyboardButton(text="Already Registered")]
     ], resize_keyboard=True)
@@ -81,7 +93,7 @@ async def start_registration(message: types.Message, state: FSMContext):
 async def process_cancel(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Process Cancelled✅", reply_markup=ReplyKeyboardRemove())
-    await start_cmd(message)
+    await start_cmd(message, state)
 
 @dp.message(MemberReg.waiting_for_id)
 async def process_id(message: types.Message, state: FSMContext):
@@ -154,11 +166,19 @@ async def already_registered(message: types.Message, state: FSMContext):
         await message.answer("আপনি এখনও রেজিস্ট্রেশন করেননি। Registration বাটনে চাপ দিন।")
 
 @dp.message(F.text == "Refresh Status🔃")
-async def handle_refresh_status(message: types.Message):
+async def handle_refresh_status(message: types.Message, state: FSMContext):
+    user = await database.get_user(db_pool, message.from_user.id)
+    if not user:
+        return await start_cmd(message, state)
     await message.answer("Your limit is over. You have successfully submitted 5 Memes. Please wait for the results♥️")
 
 @dp.message(F.photo, MemberReg.waiting_for_meme)
 async def receive_meme(message: types.Message, state: FSMContext):
+    # Reset এর পর কেউ মিম দিলে তাকে ভেরিফাই করা
+    user = await database.get_user(db_pool, message.from_user.id)
+    if not user:
+        return await start_cmd(message, state)
+
     count = await database.get_meme_count(db_pool, message.from_user.id)
     if count >= 5:
         kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Refresh Status🔃")]], resize_keyboard=True)
@@ -179,6 +199,13 @@ async def block_multiple_memes(message: types.Message):
 
 @dp.callback_query(F.data.startswith("meme_"))
 async def confirm_meme(cq: types.CallbackQuery, state: FSMContext):
+    user = await database.get_user(db_pool, cq.from_user.id)
+    if not user:
+        await cq.message.delete()
+        await state.clear()
+        kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Registration"), KeyboardButton(text="Already Registered")]], resize_keyboard=True)
+        return await bot.send_message(cq.from_user.id, "Welcome To KBKh Moderator Selection Zone!", reply_markup=kb)
+
     if cq.data == "meme_no":
         await cq.message.edit_text("Process Cancelled✅")
         await state.set_state(MemberReg.waiting_for_meme)
@@ -214,7 +241,11 @@ async def send_mod_panel(chat_id):
     await bot.send_message(chat_id, "Please select an option:", reply_markup=kb)
 
 @dp.message(F.text == "Pending Marking")
-async def show_pending(message: types.Message):
+async def show_pending(message: types.Message, state: FSMContext):
+    user = await database.get_user(db_pool, message.from_user.id)
+    if not user or user['role'] != 'MODERATOR':
+        return await start_cmd(message, state)
+
     candidates = await database.get_pending_candidates(db_pool, message.from_user.id)
     if not candidates:
         return await message.answer("No memes pending for marking!")
@@ -226,7 +257,11 @@ async def show_pending(message: types.Message):
     await message.answer("Candidates\n", reply_markup=kb)
 
 @dp.message(F.text == "Already Marked")
-async def show_marked(message: types.Message):
+async def show_marked(message: types.Message, state: FSMContext):
+    user = await database.get_user(db_pool, message.from_user.id)
+    if not user or user['role'] != 'MODERATOR':
+        return await start_cmd(message, state)
+
     candidates = await database.get_marked_candidates(db_pool, message.from_user.id)
     if not candidates:
         return await message.answer("No memes marked yet!")
@@ -294,6 +329,12 @@ async def select_mark(cq: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("submit_mark_"))
 async def finalize_mark(cq: types.CallbackQuery):
+    user = await database.get_user(db_pool, cq.from_user.id)
+    if not user or user['role'] != 'MODERATOR':
+        await cq.message.delete()
+        kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Registration"), KeyboardButton(text="Already Registered")]], resize_keyboard=True)
+        return await bot.send_message(cq.from_user.id, "Welcome To KBKh Moderator Selection Zone!", reply_markup=kb)
+
     parts = cq.data.split("_")
     if len(parts) < 4:
         return await cq.answer("Please select a mark (1-5) first!", show_alert=True)
