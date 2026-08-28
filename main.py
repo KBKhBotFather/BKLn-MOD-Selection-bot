@@ -31,6 +31,8 @@ class MemeSubmit(StatesGroup):
 class AdminSettings(StatesGroup):
     waiting_for_numbers = State()
     waiting_for_ids = State()
+    waiting_for_mod_name = State()
+    waiting_for_new_pass = State()
 
 # ================= MIDDLEWARE =================
 class GlobalCheckMiddleware(BaseMiddleware):
@@ -42,6 +44,15 @@ class GlobalCheckMiddleware(BaseMiddleware):
     ) -> Any:
         user = data.get("event_from_user")
         if user and user.id != ADMIN_ID:
+            # চেক করা মডারেটর বা মেম্বার ব্লক কি না
+            user_rec = await database.get_user(db_pool, user.id)
+            if user_rec and user_rec.get('is_blocked'):
+                if isinstance(event, types.Message):
+                    await event.answer("Access Blocked⛔")
+                elif isinstance(event, types.CallbackQuery):
+                    await event.answer("Access Blocked⛔", show_alert=True)
+                return
+
             is_on = await database.get_event_status(db_pool)
             if not is_on:
                 if isinstance(event, types.Message):
@@ -63,6 +74,9 @@ async def start_cmd(message: types.Message, state: FSMContext):
         
     user = await database.get_user(db_pool, message.from_user.id)
     if user:
+        if user['is_blocked']:
+            await message.answer("Access Blocked⛔")
+            return
         if user['role'] == 'MODERATOR':
             await send_mod_panel(message.chat.id)
             return
@@ -76,7 +90,6 @@ async def start_cmd(message: types.Message, state: FSMContext):
                 await state.set_state(MemberReg.waiting_for_meme)
             return
 
-    # User ডেটাবেসে না থাকলে (নতুন অথবা Reset হওয়ার পর)
     await state.clear()
     kb = ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="Registration"), KeyboardButton(text="Already Registered")]
@@ -114,13 +127,10 @@ async def process_id(message: types.Message, state: FSMContext):
 
 def format_phone(p):
     raw = p.replace("-", "").replace(" ", "").replace("+", "")
-    # বাংলাদেশি নম্বর (8801...) হলে 88 বাদ দিয়ে 01... বানাবে
     if raw.startswith("8801") and len(raw) == 13:
         raw = raw[2:]
-    # ১০ ডিজিটের বাংলাদেশি নম্বর (16...) হলে শুরুতে 0 বসাবে
     elif len(raw) == 10 and raw.startswith("1"):
         raw = "0" + raw
-    # অন্য যেকোনো দেশের নম্বর যেমন আছে তেমনই রিটার্ন করবে
     return raw
 
 @dp.message(MemberReg.waiting_for_phone)
@@ -130,7 +140,6 @@ async def process_phone(message: types.Message, state: FSMContext):
 
     raw_phone = format_phone(message.text)
     
-    # এখন যেকোনো দেশের বা যেকোনো লেন্থের ডিজিট হলেই চেক করবে
     if raw_phone.isdigit():
         data = await state.get_data()
         is_matched = await database.check_phone_for_id(db_pool, data['unique_id'], raw_phone)
@@ -160,6 +169,9 @@ async def submit_profile(message: types.Message, state: FSMContext):
 async def already_registered(message: types.Message, state: FSMContext):
     user = await database.get_user(db_pool, message.from_user.id)
     if user:
+        if user['is_blocked']:
+            await message.answer("Access Blocked⛔")
+            return
         count = await database.get_meme_count(db_pool, message.from_user.id)
         if count >= 5:
             kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Refresh Status🔃")]], resize_keyboard=True)
@@ -231,10 +243,29 @@ async def confirm_meme(cq: types.CallbackQuery, state: FSMContext):
         await bot.send_message(cq.from_user.id, "Your limit is over. Wait for the result. Thank you!♥️", reply_markup=kb)
         await state.clear()
 
-# ================= 2. MODERATOR VIEW =================
-@dp.message(F.text == "#KBKh2022#")
-async def mod_login(message: types.Message):
-    await database.register_user(db_pool, message.from_user.id, f"MOD_SYSTEM_{message.from_user.id}", "N/A", "MODERATOR")
+# ================= 2. MODERATOR LOGIN & VIEW =================
+@dp.message()
+async def check_mod_login(message: types.Message, state: FSMContext):
+    if message.from_user.id == ADMIN_ID:
+        return
+    
+    # অ্যাডমিন পাসওয়ার্ড ডায়নামিক চেক
+    current_pass = await database.get_mod_password(db_pool)
+    if message.text == current_pass:
+        user = await database.get_user(db_pool, message.from_user.id)
+        if user and user.get('name'):
+            await database.register_user(db_pool, message.from_user.id, user['unique_id'], user['phone_number'], 'MODERATOR')
+            await message.answer("Welcome Sir!\nYou are now in the main panel.")
+            await send_mod_panel(message.chat.id)
+        else:
+            await state.set_state(AdminSettings.waiting_for_mod_name)
+            await message.answer("Valid Id✅\nPlease Enter Your Name:")
+
+@dp.message(AdminSettings.waiting_for_mod_name)
+async def save_mod_name(message: types.Message, state: FSMContext):
+    name = message.text.strip()
+    await database.register_user(db_pool, message.from_user.id, f"MOD_{message.from_user.id}", "N/A", "MODERATOR", name=name)
+    await state.clear()
     await message.answer("Welcome Sir!\nYou are now in the main panel.")
     await send_mod_panel(message.chat.id)
 
@@ -355,11 +386,12 @@ async def cancel_mark(cq: types.CallbackQuery):
     await cq.message.delete()
     await cq.message.answer("Process Cancelled✅")
 
-# ================= 3. ADMIN VIEW =================
+# ================= 3. ADMIN VIEW & REGISTERED MEMBERS =================
 async def send_admin_panel(chat_id):
     kb = ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="Result")],
         [KeyboardButton(text="On/Off🔺"), KeyboardButton(text="Insert Data🔺")],
+        [KeyboardButton(text="Registered Members")],
         [KeyboardButton(text="Reset All Data"), KeyboardButton(text="Publish Result")]
     ], resize_keyboard=True)
     await bot.send_message(chat_id, "Admin Panel Options:", reply_markup=kb)
@@ -430,21 +462,183 @@ async def save_ids(message: types.Message, state: FSMContext):
 async def back_to_admin(message: types.Message):
     await send_admin_panel(message.chat.id)
 
+# ---- 1. RESET ALL DATA OPTIONS ----
 @dp.message(F.text == "Reset All Data")
-async def confirm_reset(message: types.Message):
+async def confirm_reset_menu(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Yes✅", callback_data="reset_yes"), InlineKeyboardButton(text="No❌", callback_data="reset_no")]
+        [InlineKeyboardButton(text="Inserted Data", callback_data="reset_opt_inserted"),
+         InlineKeyboardButton(text="All Data", callback_data="reset_opt_all")],
+        [InlineKeyboardButton(text="Cancel", callback_data="reset_opt_cancel")]
     ])
-    await message.answer("Are you sure you want to reset all data?", reply_markup=kb)
+    await message.answer("Select Reset Option:", reply_markup=kb)
 
-@dp.callback_query(F.data.startswith("reset_"))
-async def execute_reset(cq: types.CallbackQuery):
-    if cq.data == "reset_yes":
-        await database.reset_all_data(db_pool)
-        await cq.message.edit_text("All data reset successfully✅")
+@dp.callback_query(F.data == "reset_opt_inserted")
+async def reset_inserted_confirm(cq: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Yes✅", callback_data="reset_ins_yes"), InlineKeyboardButton(text="No❌", callback_data="reset_ins_no")]
+    ])
+    await cq.message.edit_text("Are you sure you want to reset all Numbers & Unique ID Data?", reply_markup=kb)
+
+@dp.callback_query(F.data == "reset_ins_yes")
+async def execute_reset_inserted(cq: types.CallbackQuery):
+    await database.reset_inserted_data(db_pool)
+    await cq.message.edit_text("Inserted Data reset successfully✅")
+
+@dp.callback_query(F.data == "reset_ins_no")
+async def back_to_reset_menu(cq: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Inserted Data", callback_data="reset_opt_inserted"),
+         InlineKeyboardButton(text="All Data", callback_data="reset_opt_all")],
+        [InlineKeyboardButton(text="Cancel", callback_data="reset_opt_cancel")]
+    ])
+    await cq.message.edit_text("Select Reset Option:", reply_markup=kb)
+
+@dp.callback_query(F.data == "reset_opt_all")
+async def reset_all_confirm(cq: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Yes✅", callback_data="reset_all_yes"), InlineKeyboardButton(text="No❌", callback_data="reset_all_no")]
+    ])
+    await cq.message.edit_text("Are you sure you want to reset ALL data?", reply_markup=kb)
+
+@dp.callback_query(F.data == "reset_all_yes")
+async def execute_reset_all(cq: types.CallbackQuery):
+    await database.reset_all_data(db_pool)
+    await cq.message.edit_text("All data reset successfully✅")
+
+@dp.callback_query(F.data.in_({"reset_all_no", "reset_opt_cancel"}))
+async def cancel_reset_menu(cq: types.CallbackQuery):
+    await cq.message.delete()
+    await cq.message.answer("Process Cancelled✅")
+
+# ---- 2. REGISTERED MEMBERS / MODERATORS MANAGEMENT ----
+@dp.message(F.text == "Registered Members")
+async def registered_members_menu(message: types.Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Moderators", callback_data="reg_mod_list"),
+         InlineKeyboardButton(text="Members", callback_data="reg_mem_list")],
+        [InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
+    ])
+    await message.answer("Select category to manage:", reply_markup=kb)
+
+@dp.callback_query(F.data == "reg_cancel")
+async def cancel_reg_menu(cq: types.CallbackQuery):
+    await cq.message.delete()
+    await cq.message.answer("Process Cancelled✅")
+
+@dp.callback_query(F.data == "reg_mod_list")
+async def show_moderators_list(cq: types.CallbackQuery):
+    mods = await database.get_all_moderators(db_pool)
+    if not mods:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Submit Change Pass", callback_data="reg_sub_pass")],
+            [InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
+        ])
+        return await cq.message.edit_text("Moderators:\nNo moderators registered yet.", reply_markup=kb)
+
+    inline_kb = []
+    for m in mods:
+        name = m['name'] or m['unique_id']
+        b_icon = "🟢" if m['is_blocked'] else "⛔"
+        inline_kb.append([
+            InlineKeyboardButton(text=name, callback_data="noop"),
+            InlineKeyboardButton(text=b_icon, callback_data=f"toggle_block_{m['telegram_id']}"),
+            InlineKeyboardButton(text="❌", callback_data=f"remove_user_{m['telegram_id']}")
+        ])
+    
+    inline_kb.append([InlineKeyboardButton(text="Submit Change Pass", callback_data="reg_sub_pass")])
+    inline_kb.append([InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")])
+    
+    await cq.message.edit_text("Moderatos:", reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_kb))
+
+@dp.callback_query(F.data == "reg_mem_list")
+async def show_members_list(cq: types.CallbackQuery):
+    mems = await database.get_all_members(db_pool)
+    if not mems:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Submit", callback_data="reg_sub_mem")],
+            [InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
+        ])
+        return await cq.message.edit_text("Members:\nNo members registered yet.", reply_markup=kb)
+
+    inline_kb = []
+    for mem in mems:
+        uid = mem['unique_id']
+        b_icon = "🟢" if mem['is_blocked'] else "⛔"
+        inline_kb.append([
+            InlineKeyboardButton(text=uid, callback_data="noop"),
+            InlineKeyboardButton(text=b_icon, callback_data=f"toggle_block_{mem['telegram_id']}"),
+            InlineKeyboardButton(text="❌", callback_data=f"remove_user_{mem['telegram_id']}")
+        ])
+    
+    inline_kb.append([InlineKeyboardButton(text="Submit", callback_data="reg_sub_mem")])
+    inline_kb.append([InlineKeyboardButton(text="Back", callback_data="reg_back"), InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")])
+    
+    await cq.message.edit_text("Members:", reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_kb))
+
+@dp.callback_query(F.data == "noop")
+async def noop_cb(cq: types.CallbackQuery):
+    await cq.answer()
+
+@dp.callback_query(F.data.startswith("toggle_block_"))
+async def toggle_block_user(cq: types.CallbackQuery):
+    tg_id = int(cq.data.split("_")[2])
+    user = await database.get_user(db_pool, tg_id)
+    if user:
+        new_status = not user['is_blocked']
+        await database.update_user_status(db_pool, tg_id, new_status)
+        
+        # লিস্ট রিফ্রেশ করা
+        if user['role'] == 'MODERATOR':
+            await show_moderators_list(cq)
+        else:
+            await show_members_list(cq)
+
+@dp.callback_query(F.data.startswith("remove_user_"))
+async def remove_user(cq: types.CallbackQuery):
+    tg_id = int(cq.data.split("_")[2])
+    user = await database.get_user(db_pool, tg_id)
+    if user:
+        role = user['role']
+        await database.delete_user_data(db_pool, tg_id)
+        if role == 'MODERATOR':
+            await show_moderators_list(cq)
+        else:
+            await show_members_list(cq)
+
+@dp.callback_query(F.data == "reg_back")
+async def reg_back_handler(cq: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Moderators", callback_data="reg_mod_list"),
+         InlineKeyboardButton(text="Members", callback_data="reg_mem_list")],
+        [InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
+    ])
+    await cq.message.edit_text("Select category to manage:", reply_markup=kb)
+
+@dp.callback_query(F.data.in_({"reg_sub_pass", "reg_sub_mem"}))
+async def reg_submit_handler(cq: types.CallbackQuery, state: FSMContext):
+    if cq.data == "reg_sub_pass":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Back", callback_data="reg_mod_list"),
+             InlineKeyboardButton(text="Cancel", callback_data="reg_cancel")]
+        ])
+        await cq.message.edit_text("Old Password: #KBKh2022#\n\nEnter New Password:", reply_markup=kb)
+        await state.set_state(AdminSettings.waiting_for_new_pass)
     else:
-        await cq.message.edit_text("Process Cancelled✅")
+        await cq.message.edit_text("Submitted✅")
 
+@dp.message(AdminSettings.waiting_for_new_pass)
+async def save_new_password(message: types.Message, state: FSMContext):
+    if message.text == "Cancel":
+        await state.clear()
+        await message.answer("Process Cancelled✅")
+        return
+    
+    new_pass = message.text.strip()
+    await database.update_mod_password(db_pool, new_pass)
+    await state.clear()
+    await message.answer("Password updated successfully & Submitted✅")
+
+# ---- ADMIN RESULTS & PUBLISH ----
 @dp.message(F.text == "Result")
 async def show_result_list(message: types.Message):
     results = await database.get_final_results(db_pool)
@@ -524,18 +718,15 @@ async def execute_publish(cq: types.CallbackQuery):
     else:
         await cq.message.delete()
 
-# ================= RENDER WEB SERVER (PORT BINDING FIXED) =================
+# ================= RENDER WEB SERVER =================
 async def handle_ping(request):
     return web.Response(text="Bot is running smoothly on Render!", status=200)
 
 async def web_server():
     app = web.Application()
-    
     app.router.add_get('/', handle_ping)
-    
     runner = web.AppRunner(app)
     await runner.setup()
-    
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
