@@ -3,7 +3,7 @@ import re
 import os
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Filter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
@@ -211,7 +211,7 @@ async def receive_meme(message: types.Message, state: FSMContext):
 
 @dp.message(F.photo, MemeSubmit.confirming_meme)
 async def block_multiple_memes(message: types.Message):
-    await message.answer("একসাথে একাধিক মিম সাবমিট করা যাবে না। একটি করে মিম সাবমিট করুন। তাড়াহুড়ো করা যাবে না!")
+    await message.answer("একসাথে একাধিক মিম সাবমিট করা যাবেবিধা নেই। একটি করে মিম সাবমিট করুন। তাড়াহুড়ো করা যাবে না!")
 
 @dp.callback_query(F.data.startswith("meme_"))
 async def confirm_meme(cq: types.CallbackQuery, state: FSMContext):
@@ -244,22 +244,25 @@ async def confirm_meme(cq: types.CallbackQuery, state: FSMContext):
         await state.clear()
 
 # ================= 2. MODERATOR LOGIN & VIEW =================
-@dp.message()
+class ModPassFilter(Filter):
+    async def __call__(self, message: types.Message) -> bool:
+        if not message.text: return False
+        current_pass = await database.get_mod_password(db_pool)
+        return message.text == current_pass
+
+@dp.message(ModPassFilter())
 async def check_mod_login(message: types.Message, state: FSMContext):
     if message.from_user.id == ADMIN_ID:
         return
-    
-    # অ্যাডমিন পাসওয়ার্ড ডায়নামিক চেক
-    current_pass = await database.get_mod_password(db_pool)
-    if message.text == current_pass:
-        user = await database.get_user(db_pool, message.from_user.id)
-        if user and user.get('name'):
-            await database.register_user(db_pool, message.from_user.id, user['unique_id'], user['phone_number'], 'MODERATOR')
-            await message.answer("Welcome Sir!\nYou are now in the main panel.")
-            await send_mod_panel(message.chat.id)
-        else:
-            await state.set_state(AdminSettings.waiting_for_mod_name)
-            await message.answer("Valid Id✅\nPlease Enter Your Name:")
+        
+    user = await database.get_user(db_pool, message.from_user.id)
+    if user and user.get('name'):
+        await database.register_user(db_pool, message.from_user.id, user['unique_id'], user['phone_number'], 'MODERATOR')
+        await message.answer("Welcome Sir!\nYou are now in the main panel.")
+        await send_mod_panel(message.chat.id)
+    else:
+        await state.set_state(AdminSettings.waiting_for_mod_name)
+        await message.answer("Valid Id✅\nPlease Enter Your Name:")
 
 @dp.message(AdminSettings.waiting_for_mod_name)
 async def save_mod_name(message: types.Message, state: FSMContext):
