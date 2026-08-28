@@ -10,11 +10,22 @@ async def get_pool():
                 id SERIAL PRIMARY KEY,
                 unique_id VARCHAR,
                 phone_number VARCHAR
-            )
+            );
+            CREATE TABLE IF NOT EXISTS admin_password (
+                id INT PRIMARY KEY DEFAULT 1,
+                password VARCHAR DEFAULT '#KBKh2022#'
+            );
+            INSERT INTO admin_password (id, password) VALUES (1, '#KBKh2022#') ON CONFLICT DO NOTHING;
         """)
+        # users টেবিলে নাম এবং ব্লক স্ট্যাটাস কলাম যোগ করা (যদি না থাকে)
+        try:
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR;")
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;")
+        except:
+            pass
     return pool
 
-# ================= ADMIN SETTINGS =================
+# ================= ADMIN SETTINGS & PASSWORD =================
 async def get_event_status(pool):
     async with pool.acquire() as conn:
         return await conn.fetchval("SELECT event_status FROM admin_settings WHERE id = 1")
@@ -23,6 +34,15 @@ async def toggle_event_status(pool, status: bool):
     async with pool.acquire() as conn:
         await conn.execute("UPDATE admin_settings SET event_status = $1 WHERE id = 1", status)
 
+async def get_mod_password(pool):
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT password FROM admin_password WHERE id = 1")
+
+async def update_mod_password(pool, new_pass):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE admin_password SET password = $1 WHERE id = 1", new_pass)
+
+# ================= CREDENTIALS RESET =================
 async def insert_paired_numbers(pool, nums):
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT id FROM kbkh_pairs ORDER BY id ASC")
@@ -51,10 +71,13 @@ async def check_phone_for_id(pool, unique_id, phone):
         expected = await conn.fetchval("SELECT phone_number FROM kbkh_pairs WHERE unique_id = $1", unique_id)
         return expected == phone
 
+async def reset_inserted_data(pool):
+    async with pool.acquire() as conn:
+        await conn.execute("TRUNCATE kbkh_pairs RESTART IDENTITY CASCADE;")
+
 async def reset_all_data(pool):
     async with pool.acquire() as conn:
         try:
-            # একদম A-Z সব মুছে ফ্রেশ করার কমান্ড
             await conn.execute("TRUNCATE memes, users, kbkh_pairs RESTART IDENTITY CASCADE;")
         except:
             pass
@@ -65,13 +88,34 @@ async def get_user(pool, tg_id):
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE telegram_id = $1", tg_id)
 
-async def register_user(pool, tg_id, unique_id, phone, role):
+async def register_user(pool, tg_id, unique_id, phone, role, name=None):
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO users (telegram_id, unique_id, phone_number, role)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (telegram_id) DO UPDATE SET unique_id=$2, phone_number=$3, role=$4
-        """, tg_id, unique_id, phone, role)
+            INSERT INTO users (telegram_id, unique_id, phone_number, role, name)
+            VALUES ($1, $2, $3, $4, COALESCE($5, (SELECT name FROM users WHERE telegram_id = $1)))
+            ON CONFLICT (telegram_id) DO UPDATE SET unique_id=$2, phone_number=$3, role=$4, name=COALESCE($5, users.name)
+        """, tg_id, unique_id, phone, role, name)
+
+async def update_user_name(pool, tg_id, name):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET name = $1 WHERE telegram_id = $2", name, tg_id)
+
+async def get_all_moderators(pool):
+    async with pool.acquire() as conn:
+        return await conn.fetch("SELECT telegram_id, unique_id, name, is_blocked FROM users WHERE role = 'MODERATOR'")
+
+async def get_all_members(pool):
+    async with pool.acquire() as conn:
+        return await conn.fetch("SELECT telegram_id, unique_id, name, is_blocked FROM users WHERE role = 'MEMBER'")
+
+async def update_user_status(pool, telegram_id, is_blocked):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_blocked = $1 WHERE telegram_id = $2", is_blocked, telegram_id)
+
+async def delete_user_data(pool, telegram_id):
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM memes WHERE member_tg_id = $1 OR assigned_mod_tg_id = $1", telegram_id)
+        await conn.execute("DELETE FROM users WHERE telegram_id = $1", telegram_id)
 
 # ================= MEME SUBMISSION =================
 async def get_meme_count(pool, tg_id):
@@ -80,24 +124,23 @@ async def get_meme_count(pool, tg_id):
 
 async def add_meme(pool, tg_id, file_id):
     async with pool.acquire() as conn:
-        # মডারেটর ফিক্সড করা, যেন ৫টি মিম একজন মডারেটরের কাছেই যায়
         mod_id = await conn.fetchval("SELECT assigned_mod_tg_id FROM memes WHERE member_tg_id = $1 LIMIT 1", tg_id)
         if not mod_id:
             mod_id = await conn.fetchval("""
                 SELECT telegram_id FROM users 
-                WHERE role = 'MODERATOR' 
+                WHERE role = 'MODERATOR' AND is_blocked = FALSE
                 ORDER BY (SELECT COUNT(DISTINCT member_tg_id) FROM memes WHERE assigned_mod_tg_id = users.telegram_id) ASC 
                 LIMIT 1
             """)
-        await conn.execute("""
-            INSERT INTO memes (file_id, member_tg_id, assigned_mod_tg_id)
-            VALUES ($1, $2, $3)
-        """, file_id, tg_id, mod_id)
+        if mod_id:
+            await conn.execute("""
+                INSERT INTO memes (file_id, member_tg_id, assigned_mod_tg_id)
+                VALUES ($1, $2, $3)
+            """, file_id, tg_id, mod_id)
 
 # ================= MODERATOR MARKING =================
 async def get_pending_candidates(pool, mod_tg_id):
     async with pool.acquire() as conn:
-        # ৫টি মিম সাবমিট ও মার্কিং না হওয়া পর্যন্ত লিস্টে দেখাবে 
         return await conn.fetch("""
             SELECT u.unique_id, SUM(CASE WHEN m.is_marked = FALSE THEN 1 ELSE 0 END) as pending_count 
             FROM memes m JOIN users u ON m.member_tg_id = u.telegram_id
