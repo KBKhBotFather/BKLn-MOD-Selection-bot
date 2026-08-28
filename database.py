@@ -4,7 +4,6 @@ DB_URL = "postgresql://neondb_owner:npg_fWjluDvkZJ61@ep-blue-star-ay2wc9j2-poole
 
 async def get_pool():
     pool = await asyncpg.create_pool(DB_URL)
-    # নতুন 1-to-1 Mapping টেবিল
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS kbkh_pairs (
@@ -81,10 +80,8 @@ async def get_meme_count(pool, tg_id):
 
 async def add_meme(pool, tg_id, file_id):
     async with pool.acquire() as conn:
-        # ১. চেক করা হবে এই মেম্বারের কোনো মডারেটর আগে থেকেই ফিক্সড আছে কি না
+        # মডারেটর ফিক্সড করা, যেন ৫টি মিম একজন মডারেটরের কাছেই যায়
         mod_id = await conn.fetchval("SELECT assigned_mod_tg_id FROM memes WHERE member_tg_id = $1 LIMIT 1", tg_id)
-        
-        # ২. যদি ফিক্সড না থাকে, তবে যে মডারেটরের কাছে সবচেয়ে কম মেম্বার আছে তাকে দেওয়া হবে
         if not mod_id:
             mod_id = await conn.fetchval("""
                 SELECT telegram_id FROM users 
@@ -92,7 +89,6 @@ async def add_meme(pool, tg_id, file_id):
                 ORDER BY (SELECT COUNT(DISTINCT member_tg_id) FROM memes WHERE assigned_mod_tg_id = users.telegram_id) ASC 
                 LIMIT 1
             """)
-            
         await conn.execute("""
             INSERT INTO memes (file_id, member_tg_id, assigned_mod_tg_id)
             VALUES ($1, $2, $3)
@@ -101,7 +97,7 @@ async def add_meme(pool, tg_id, file_id):
 # ================= MODERATOR MARKING =================
 async def get_pending_candidates(pool, mod_tg_id):
     async with pool.acquire() as conn:
-        # যতক্ষণ না ৫টা জমা হচ্ছে এবং ৫টাই মার্কিং হচ্ছে, ততক্ষণ লিস্টে দেখাবে
+        # ৫টি মিম সাবমিট ও মার্কিং না হওয়া পর্যন্ত লিস্টে দেখাবে 
         return await conn.fetch("""
             SELECT u.unique_id, SUM(CASE WHEN m.is_marked = FALSE THEN 1 ELSE 0 END) as pending_count 
             FROM memes m JOIN users u ON m.member_tg_id = u.telegram_id
