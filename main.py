@@ -114,9 +114,13 @@ async def process_id(message: types.Message, state: FSMContext):
 
 def format_phone(p):
     raw = p.replace("-", "").replace(" ", "").replace("+", "")
-    if raw.startswith("88"): raw = raw[2:]
-    if len(raw) == 10 and not raw.startswith("0"):
+    # বাংলাদেশি নম্বর (8801...) হলে 88 বাদ দিয়ে 01... বানাবে
+    if raw.startswith("8801") and len(raw) == 13:
+        raw = raw[2:]
+    # ১০ ডিজিটের বাংলাদেশি নম্বর (16...) হলে শুরুতে 0 বসাবে
+    elif len(raw) == 10 and raw.startswith("1"):
         raw = "0" + raw
+    # অন্য যেকোনো দেশের নম্বর যেমন আছে তেমনই রিটার্ন করবে
     return raw
 
 @dp.message(MemberReg.waiting_for_phone)
@@ -126,7 +130,8 @@ async def process_phone(message: types.Message, state: FSMContext):
 
     raw_phone = format_phone(message.text)
     
-    if len(raw_phone) == 11 and raw_phone.isdigit():
+    # এখন যেকোনো দেশের বা যেকোনো লেন্থের ডিজিট হলেই চেক করবে
+    if raw_phone.isdigit():
         data = await state.get_data()
         is_matched = await database.check_phone_for_id(db_pool, data['unique_id'], raw_phone)
         
@@ -174,7 +179,6 @@ async def handle_refresh_status(message: types.Message, state: FSMContext):
 
 @dp.message(F.photo, MemberReg.waiting_for_meme)
 async def receive_meme(message: types.Message, state: FSMContext):
-    # Reset এর পর কেউ মিম দিলে তাকে ভেরিফাই করা
     user = await database.get_user(db_pool, message.from_user.id)
     if not user:
         return await start_cmd(message, state)
